@@ -1,115 +1,125 @@
 import io
 import os
+import torch
+import numpy as np
+import clip
+from PIL import Image
+import pytesseract
+from langchain.vectorstores import Chroma
 import google.generativeai as genai
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import Chroma
 from langchain.chains import RetrievalQA
-import pdfplumber
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import requests
-import webbrowser
-import concurrent.futures
-import prettytable
-import torch
 import streamlit as st
 from dotenv import load_dotenv
-import dalle  # Assuming you have a dalle image generation API or similar
 
 # Load API key from environment
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
-# Detect if a GPU is available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Configure Gemini API
+genai.configure(api_key=API_KEY)
 
-# Function to format DOT code
-def format_dot_code(dot_code: str) -> str:
-    formatted_code = dot_code.strip("```dot").strip()
-    lines = formatted_code.split("\n")
-    for i, line in enumerate(lines):
-        if "rankdir" in line:
-            lines[i] = "    rankdir=TB;"
-    return "\n".join(lines)
+# Load CLIP model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+clip_model, preprocess = clip.load("ViT-B/32", device=device)
 
-# Function to get PNG from the API and return it as bytes
-def get_png_bytes(dot_code: str) -> bytes:
-    quickchart_url = "https://quickchart.io/graphviz"
-    post_data = {"graph": dot_code, "format": "png"}
+# Initialize tesseract for OCR
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
-    try:
-        response = requests.post(quickchart_url, json=post_data, verify=False)
-        response.raise_for_status()
+# Function to extract images and text from a PDF using pdfplumber
+pdf_path = "/content/anatomy_vol_2.pdf"
+images_data = []
 
-        content_type = response.headers.get("content-type", "").lower()
-        if "image/png" in content_type:
-            return response.content
-        else:
-            print("Unexpected response content type:", content_type)
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
-        return None
+with pdfplumber.open(pdf_path) as pdf:
+    for i, page in enumerate(pdf.pages):
+        for img in page.images:
+            img_bbox = (img['x0'], img['top'], img['x1'], img['bottom'])
+            img_cropped = page.within_bbox(img_bbox).to_image()
 
-# Function to load and extract text from PDF
-def extract_pdf_text(uploaded_file):
-    pages = []
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            pages.append(text)
-    return "\n\n".join(pages)
+            image_bytes = io.BytesIO()
+            img_cropped.save(image_bytes, format="PNG")
 
-# Function to split the text into chunks for embeddings
-def split_text(text, chunk_size=5000, chunk_overlap=500):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    return text_splitter.split_text(text)
+            # Extract text from image using OCR (if applicable)
+            image_pil = Image.open(io.BytesIO(image_bytes.getvalue()))
+            recognized_text = pytesseract.image_to_string(image_pil)
 
-# Function to create the vector store (only needed once, can be stored and reused)
-def create_vector_store(texts):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=API_KEY)
-    vector_index = Chroma.from_texts(texts, embeddings).as_retriever(search_kwargs={"k": 3})  # Top 3 results for faster search
-    return vector_index
+            images_data.append({
+                "page_number": i + 1,
+                "image_data": image_bytes.getvalue(),
+                "bbox": img_bbox,
+                "recognized_text": recognized_text
+            })
 
-# Asynchronous function to process the PDF and create the vector store
-def process_pdf_async(uploaded_file):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(process_pdf, uploaded_file)
-        return future.result()
+# Process images to obtain CLIP embeddings
+image_embeddings = []
+for img_data in images_data:
+    image = Image.open(io.BytesIO(img_data['image_data']))
+    image_input = preprocess(image).unsqueeze(0).to(device)
 
-# Synchronous version of processing PDF
-def process_pdf(uploaded_file):
-    context = extract_pdf_text(uploaded_file)
-    texts = split_text(context)
-    vector_index = create_vector_store(texts)
-    return vector_index
+    with torch.no_grad():
+        img_embedding = clip_model.encode_image(image_input).cpu().numpy()
 
-# Function to set up the QA chain
-def setup_qa_chain(vector_index):
-    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=API_KEY, temperature=0.2, convert_system_message_to_human=True)
-    qa_chain = RetrievalQA.from_chain_type(
-        model,
-        retriever=vector_index,
-        return_source_documents=True
-    )
-    return qa_chain
+    image_embeddings.append({
+        "page_number": img_data["page_number"],
+        "embedding": img_embedding,
+        "image_data": img_data["image_data"],
+        "recognized_text": img_data["recognized_text"]
+    })
 
-# Function to handle question answering
-def answer_question(question, qa_chain):
-    result = qa_chain({"query": question})
-    return result["result"]
+class InMemoryImageStore:
+    def __init__(self):
+        self.image_embeddings = []
+        self.image_metadata = []
 
-# Function to generate an image if the prompt contains 'image' or 'picture'
-def generate_image_from_prompt(prompt):
-    if any(keyword in prompt.lower() for keyword in ["image", "picture"]):
-        # Generate an image based on the prompt
-        image_description = f"Generate an image of {prompt}"
-        generated_image = dalle.text2im({
-            "size": "1024x1024",
-            "n": 1,
-            "prompt": image_description
-        })
-        return generated_image['data'][0]['url']  # Assuming the API returns a URL to the generated image
-    return None
+    def add_image(self, embedding, metadata):
+        self.image_embeddings.append(embedding)
+        self.image_metadata.append(metadata)
+
+    def query(self, query_embedding, top_k=5):
+        def compute_similarity(a, b):
+            a_flat = a.flatten()
+            b_flat = b.flatten()
+            return np.dot(a_flat, b_flat) / (np.linalg.norm(a_flat) * np.linalg.norm(b_flat))
+
+        image_scores = [(idx, compute_similarity(query_embedding, emb)) for idx, emb in enumerate(self.image_embeddings)]
+        image_scores.sort(key=lambda x: x[1], reverse=True)
+        return image_scores[:top_k]
+
+# Create the image store and add images with their embeddings
+image_store = InMemoryImageStore()
+for img_data in image_embeddings:
+    image_store.add_image(img_data["embedding"], img_data["image_data"])
+
+def retrieve_images(query_embedding, top_k=5):
+    query_embedding = np.array(query_embedding).flatten()
+    image_scores = []
+
+    for idx, emb in enumerate(image_embeddings):
+        emb_array = np.array(emb['embedding']).flatten()
+        score = compute_similarity(query_embedding, emb_array)
+        image_scores.append((idx, score))
+
+    image_scores.sort(key=lambda x: x[1], reverse=True)
+    return image_scores[:top_k]
+
+def run_image_query(query):
+    query_embedding = clip_model.encode_text(clip.tokenize(query).to(device)).detach().cpu().numpy()
+    top_images = retrieve_images(query_embedding)
+    return top_images
+
+def query_gemini(prompt):
+    response = genai.generate_text(prompt=prompt)
+    return response.result
+
+# Function to handle text correction/enhancement
+def handle_text_correction(prompt):
+    if 'image' in prompt.lower() or 'picture' in prompt.lower():
+        top_images = run_image_query(prompt)
+        return top_images
+    else:
+        return query_gemini(prompt)
 
 # Main function for Streamlit UI
 def main():
@@ -148,16 +158,22 @@ def main():
             answer = answer_question(question, st.session_state['qa_chain'])
             st.write(f"Answer: {answer}")
 
-            # Check if the prompt contains 'image' or 'picture' and display the generated image
-            image_url = generate_image_from_prompt(question)
-            if image_url:
-                st.image(image_url, caption="Generated Image")
+            # Check for 'image' or 'picture' in the prompt
+            if 'image' in question.lower() or 'picture' in question.lower():
+                top_images = run_image_query(question)
+                if top_images:
+                    for idx, score in top_images:
+                        image_data = image_embeddings[idx]['image_data']
+                        st.image(image_data, caption=f"Image {idx} - Score: {score:.2f}")
+                else:
+                    st.warning("No images found for the query.")
+            else:
+                corrected_text = query_gemini(question)
+                st.write(f"Corrected or enhanced text: {corrected_text}")
+
         else:
             st.warning("Please upload or select a document first.")
     
-    genai.configure(api_key=API_KEY)
-    model1 = genai.GenerativeModel("gemini-1.5-flash-latest")
-
     # Flowchart generation section
     if st.button("Generate Flowchart"):
         med_query = answer
@@ -181,7 +197,7 @@ def main():
         table_question = f"{med_query}.\n FOR THE GIVEN TEXT ABOVE, GENERATE A TABLE. THE TABLE SHOULD BE IN PRETTY TABLE PYTHON CODE. GIVE ONLY CODE"
         response = model1.generate_content(table_question)
 
-        clean_code = response.text.strip('```python').strip('```')
+        clean_code = response.text.strip('python').strip('')
 
         # Prepare a local variable dictionary to execute the code safely
         local_vars = {}
