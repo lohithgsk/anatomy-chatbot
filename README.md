@@ -69,11 +69,11 @@ streamlit run app.py
   - **Table Reconstruction**:
       The chatbot reconstructs tables using data extracted by the Gemini API, ensuring accurate and structured presentation for the user.
 
-## Feedback
-If you have any issues, reach out to us.
-
   - **Answering Reference Questions at the End of Each Chapter**:
       The chatbot accurately answers reference questions by linking the query to specific sections of the anatomy textbooks, using indexed content.
 
   - **Final Latency Optimization**:
        Asynchronous processing and additional caching were implemented to handle higher loads and further reduce response times.
+
+## Feedback
+If you have any issues, reach out to us.
