@@ -115,7 +115,7 @@ def main():
             file_link = f'<a href="{file_path}" target="_blank">{file_name}</a>'
             st.markdown(file_link, unsafe_allow_html=True)
 
-        uploaded_file = st.file_uploader("Upload your PDFs here", type=["pdf"])
+        uploaded_file = st.file_uploader("Upload Anatomy book PDFs here", type=["pdf"])
 
         if uploaded_file is not None:
             if 'vector_index' not in st.session_state:
@@ -146,6 +146,7 @@ def main():
             Please use Graphviz DOT Language. Try to make it as detailed as possible with all the steps involved in the process.\
             Add colors to the different stages of the process to make it visually appealing."
         response = model1.generate_content(flowchart_question)
+        print(flowchart_question)
 
         formatted_dot_code = format_dot_code(response.text)
 
