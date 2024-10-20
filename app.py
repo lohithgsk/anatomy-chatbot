@@ -13,6 +13,7 @@ import prettytable
 import torch
 import streamlit as st
 from dotenv import load_dotenv
+from google.api_core.exceptions import PermissionDenied
 from PIL import Image
 
 # Load API key from environment
@@ -100,7 +101,7 @@ def answer_question(question, qa_chain):
 
 # Main function for Streamlit UI
 def main():
-    st.set_page_config(page_title="Anatomy 101", page_icon=":books:")
+    st.set_page_config(page_title="Chatbot 101", page_icon=":books:")
 
     with st.sidebar:
         st.subheader("Your Documents")
@@ -116,7 +117,7 @@ def main():
             file_link = f'<a href="{file_path}" target="_blank">{file_name}</a>'
             st.markdown(file_link, unsafe_allow_html=True)
 
-        uploaded_file = st.file_uploader("Upload Anatomy book PDFs here", type=["pdf"])
+        uploaded_file = st.file_uploader("Upload book PDFs here", type=["pdf"])
 
         if uploaded_file is not None:
             if 'vector_index' not in st.session_state:
@@ -125,8 +126,8 @@ def main():
                 st.session_state['qa_chain'] = setup_qa_chain(st.session_state['vector_index'])
                 st.success("File processed successfully!")
 
-    st.title("Anatomy 101")
-    st.header("Welcome to Anatomy 101")
+    st.title("Chatbot 101")
+    st.header("Welcome to Chatbot 101")
 
     question = st.text_input("Ask a question!")
 
@@ -140,46 +141,6 @@ def main():
     genai.configure(api_key=API_KEY)
     model1 = genai.GenerativeModel("gemini-1.5-flash-latest")
 
-    # Display the uploaded image and handle image input
-    uploaded_image = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
-
-    if uploaded_image is not None:
-        st.write(f"Uploaded image: {uploaded_image.name}")
-        image = Image.open(uploaded_image)
-        st.image(image, caption="Uploaded Image", use_column_width=True)
-
-        # Convert image to bytes for further processing
-        image_bytes = io.BytesIO()
-        image.save(image_bytes, format="PNG")
-        image_bytes = image_bytes.getvalue()
-
-        st.write("Image uploaded and ready for processing!")
-
-        try:
-            # Upload image bytes to Gemini API
-            # Assuming the API accepts binary image uploads in some form
-            # Uploading image for description
-            myfile = genai.upload_file(image_bytes, file_type="image/jpeg")
-
-            # Create an instance of the generative model
-            model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-
-            # Generate content based on the uploaded image
-            # Adjust the prompt to instruct the model to describe the image
-            result = model.generate_content([myfile], prompt="Describe the content of this image.")
-
-            # Display the result
-            st.write("Image Description:", result)
-
-        except PermissionDenied:
-            st.error("Permission denied while using the generative model.")
-        
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-
-        finally:
-            # Ensure that the uploaded file is deleted after processing
-            myfile.delete()
 
     # Flowchart generation section
     if st.button("Generate Flowchart"):
